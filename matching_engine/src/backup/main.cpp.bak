@@ -1,0 +1,295 @@
+#include <iostream>
+#include <vector>
+#include <memory>
+#include <thread>
+#include <chrono>
+#include <conio.h>
+#include <algorithm>
+#include <iomanip>
+#include <sstream>
+#include <windows.h>
+#include "OrderBook.hpp"
+#include "MockTrader.hpp"
+#include "Logger.hpp"
+#include "MarketDisplay.hpp"
+#include "MockTrader.hpp"
+#include "Logger.hpp"
+
+#include "MarketDisplay.hpp"
+
+class TradingApplication {
+public:
+    TradingApplication()
+        : orderBook_(std::make_shared<OrderBook>())
+        , logger_("trading_log.txt")
+        , userTradeCount_(0)
+        , marketDisplay_(std::make_shared<MarketDisplay>(orderBook_))
+    {
+        // Create a new console for user interaction
+        FreeConsole();
+        AllocConsole();
+        SetConsoleTitle(L"Trading Terminal");
+        
+        // Redirect standard streams to new console
+        FILE* dummy;
+        freopen_s(&dummy, "CONOUT$", "w", stdout);
+        freopen_s(&dummy, "CONIN$", "r", stdin);
+    }
+
+    void start() {
+        // Start mock traders
+        std::cout << "Starting 10,000 mock traders..." << std::endl;
+        for (int i = 0; i < 10000; ++i) {
+            auto trader = std::make_shared<MockTrader>(
+                orderBook_,
+                "MOCK_" + std::to_string(i)
+            );
+            mockTraders_.push_back(trader);
+            trader->start();
+        }
+
+        // Start market data display thread
+        displayThread_ = std::thread(&TradingApplication::displayMarketData, this);
+
+        // Main trading loop
+        running_ = true;
+        while (running_) {
+            if (_kbhit()) {
+                char choice = _getch();
+                switch (choice) {
+                    case '1':
+                        handleBuyOrder();
+                        break;
+                    case '2':
+                        handleSellOrder();
+                        break;
+                    case '3':
+                        viewUserOrders();
+                        break;
+                    case '4':
+                        queryOrderStatus();
+                        break;
+                    case '5':
+                        running_ = false;
+                        break;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        // Cleanup
+        for (auto& trader : mockTraders_) {
+            trader->stop();
+        }
+        
+        if (displayThread_.joinable()) {
+            displayThread_.join();
+        }
+    }
+
+private:
+    void handleBuyOrder() {
+        addToHistory("=== Placing Buy Order ===");
+        addToHistory("Enter order type (1 for Market, 2 for Limit):");
+        int type;
+        std::cin >> type;
+
+        addToHistory("Enter quantity:");
+        size_t quantity;
+        std::cin >> quantity;
+
+        double price = 0.0;
+        if (type == 2) {
+            addToHistory("Enter price:");
+            std::cin >> price;
+        }
+
+        auto order = std::make_shared<Order>(
+            type == 1 ? OrderType::MARKET : OrderType::LIMIT,
+            OrderSide::BUY,
+            price,
+            quantity,
+            TimeInForce::GTC,
+            "USER_" + std::to_string(++userTradeCount_)
+        );
+
+        orderBook_->addOrder(order);
+        logger_.logOrder(*order);
+        userOrders_.push_back(order);
+
+        std::stringstream ss;
+        ss << "BUY Order placed - ID: " << order->getOrderId() 
+           << " | Type: " << (type == 1 ? "MARKET" : "LIMIT")
+           << " | Quantity: " << quantity;
+        if (type == 2) {
+            ss << " | Price: $" << std::fixed << std::setprecision(2) << price;
+        }
+        addToHistory(ss.str());
+    }
+
+    void handleSellOrder() {
+        addToHistory("=== Placing Sell Order ===");
+        addToHistory("Enter order type (1 for Market, 2 for Limit):");
+        int type;
+        std::cin >> type;
+
+        addToHistory("Enter quantity:");
+        size_t quantity;
+        std::cin >> quantity;
+
+        double price = 0.0;
+        if (type == 2) {
+            addToHistory("Enter price:");
+            std::cin >> price;
+        }
+
+        auto order = std::make_shared<Order>(
+            type == 1 ? OrderType::MARKET : OrderType::LIMIT,
+            OrderSide::SELL,
+            price,
+            quantity,
+            TimeInForce::GTC,
+            "USER_" + std::to_string(++userTradeCount_)
+        );
+
+        orderBook_->addOrder(order);
+        logger_.logOrder(*order);
+        userOrders_.push_back(order);
+
+        std::stringstream ss;
+        ss << "SELL Order placed - ID: " << order->getOrderId() 
+           << " | Type: " << (type == 1 ? "MARKET" : "LIMIT")
+           << " | Quantity: " << quantity;
+        if (type == 2) {
+            ss << " | Price: $" << std::fixed << std::setprecision(2) << price;
+        }
+        addToHistory(ss.str());
+    }
+
+    void viewUserOrders() {
+        addToHistory("=== Your Orders ===");
+        if (userOrders_.empty()) {
+            addToHistory("No orders found.");
+            return;
+        }
+
+        for (const auto& order : userOrders_) {
+            std::stringstream ss;
+            ss << "ID: " << order->getOrderId() 
+               << " | Type: " << (order->getType() == OrderType::LIMIT ? "LIMIT" : "MARKET")
+               << " | Side: " << (order->getSide() == OrderSide::BUY ? "BUY" : "SELL")
+               << " | Price: $" << std::fixed << std::setprecision(2) << order->getPrice()
+               << " | Qty: " << order->getQuantity()
+               << " | Remaining: " << order->getRemainingQuantity()
+               << " | Status: ";
+            
+            switch (order->getStatus()) {
+                case OrderStatus::NEW: ss << "NEW"; break;
+                case OrderStatus::PARTIALLY_FILLED: ss << "PARTIAL"; break;
+                case OrderStatus::FILLED: ss << "FILLED"; break;
+                case OrderStatus::CANCELLED: ss << "CANCELLED"; break;
+                case OrderStatus::EXPIRED: ss << "EXPIRED"; break;
+            }
+            addToHistory(ss.str());
+        }
+    }
+
+    void queryOrderStatus() {
+        addToHistory("=== Query Order Status ===");
+        addToHistory("Enter Order ID:");
+        std::string orderId;
+        std::cin >> orderId;
+
+        auto it = std::find_if(userOrders_.begin(), userOrders_.end(),
+            [&orderId](const std::shared_ptr<Order>& order) {
+                return order->getOrderId() == orderId;
+            });
+
+        if (it != userOrders_.end()) {
+            auto order = *it;
+            std::stringstream ss;
+            ss << "Order Details - ID: " << orderId << "\n"
+               << "Type: " << (order->getType() == OrderType::LIMIT ? "LIMIT" : "MARKET") << "\n"
+               << "Side: " << (order->getSide() == OrderSide::BUY ? "BUY" : "SELL") << "\n"
+               << "Price: $" << std::fixed << std::setprecision(2) << order->getPrice() << "\n"
+               << "Original Quantity: " << order->getQuantity() << "\n"
+               << "Remaining Quantity: " << order->getRemainingQuantity() << "\n"
+               << "Status: ";
+            
+            switch (order->getStatus()) {
+                case OrderStatus::NEW: ss << "NEW"; break;
+                case OrderStatus::PARTIALLY_FILLED: ss << "PARTIALLY FILLED"; break;
+                case OrderStatus::FILLED: ss << "FILLED"; break;
+                case OrderStatus::CANCELLED: ss << "CANCELLED"; break;
+                case OrderStatus::EXPIRED: ss << "EXPIRED"; break;
+            }
+            addToHistory(ss.str());
+        } else {
+            addToHistory("Order not found: " + orderId);
+        }
+    }
+
+    std::vector<std::string> messageHistory_;
+    std::mutex historyMutex_;
+
+    void addToHistory(const std::string& message) {
+        std::lock_guard<std::mutex> lock(historyMutex_);
+        messageHistory_.push_back(message);
+        if (messageHistory_.size() > 10) {  // Keep last 10 messages
+            messageHistory_.erase(messageHistory_.begin());
+        }
+    }
+
+    void displayMarketData() {
+        while (running_) {
+            system("cls");
+            double bestBid = orderBook_->getBestBidPrice();
+            double bestAsk = orderBook_->getBestAskPrice();
+            
+            // Display message history
+            std::cout << "\n=== Transaction History ===\n";
+            {
+                std::lock_guard<std::mutex> lock(historyMutex_);
+                for (const auto& msg : messageHistory_) {
+                    std::cout << msg << "\n";
+                }
+            }
+            
+            // Display market data
+            std::cout << "\n=== Live Market Data ===\n";
+            std::cout << "+--------------------+\n";
+            std::cout << "|    MARKET DATA     |\n";
+            std::cout << "+--------------------+\n";
+            std::cout << "| Best Bid: $" << std::fixed << std::setprecision(2) << std::setw(7) << bestBid << " |\n";
+            std::cout << "| Best Ask: $" << std::fixed << std::setprecision(2) << std::setw(7) << bestAsk << " |\n";
+            std::cout << "+--------------------+\n";
+            
+            // Display menu
+            std::cout << "\n+------------------+\n";
+            std::cout << "|       MENU        |\n";
+            std::cout << "+------------------+\n";
+            std::cout << "| 1. Place Buy     |\n";
+            std::cout << "| 2. Place Sell    |\n";
+            std::cout << "| 3. View Orders   |\n";
+            std::cout << "| 4. Query Order   |\n";
+            std::cout << "| 5. Exit          |\n";
+            std::cout << "+------------------+\n";
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+    }
+
+    std::shared_ptr<OrderBook> orderBook_;
+    Logger logger_;
+    std::vector<std::shared_ptr<MockTrader>> mockTraders_;
+    std::vector<std::shared_ptr<Order>> userOrders_;
+    std::atomic<bool> running_{false};
+    std::thread displayThread_;
+    std::atomic<int> userTradeCount_;
+};
+
+int main() {
+    TradingApplication app;
+    app.start();
+    return 0;
+}
