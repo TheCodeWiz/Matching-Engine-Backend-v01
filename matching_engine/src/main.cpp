@@ -16,6 +16,35 @@
 #include "MarketDisplay.hpp"
 #include "Instrument.hpp"
 
+// Structure to track user's active trades/positions
+struct UserTrade {
+    std::string orderId;
+    int instrumentId;
+    OrderSide side;
+    size_t quantity;
+    double entryPrice;
+    bool isActive;
+    
+    UserTrade(const std::string& id, int instId, OrderSide s, size_t qty, double price)
+        : orderId(id), instrumentId(instId), side(s), quantity(qty), entryPrice(price), isActive(true) {}
+};
+
+// Structure to store closed/squared-off trades in history
+struct ClosedTrade {
+    std::string orderId;
+    int instrumentId;
+    OrderSide side;
+    size_t quantity;
+    double entryPrice;
+    double exitPrice;
+    double realizedPnL;
+    double pnlPercent;
+    std::chrono::system_clock::time_point exitTime;
+    
+    ClosedTrade(const std::string& id, int instId, OrderSide s, size_t qty, double entry, double exit, double pnl, double pnlPct)
+        : orderId(id), instrumentId(instId), side(s), quantity(qty), entryPrice(entry), exitPrice(exit), 
+          realizedPnL(pnl), pnlPercent(pnlPct), exitTime(std::chrono::system_clock::now()) {}
+};
 
 class TradingApplication {
     // Display all trades (user and mock traders) for the selected instrument
@@ -42,6 +71,9 @@ public:
     TradingApplication()
         : logger_("trading_log.txt")
         , userTradeCount_(0)
+        , userId_("USR10001")
+        , totalBalance_(5000000.0)
+        , totalRealizedPnL_(0.0)
     {
         // Create order books for each instrument
         for (const auto& instrument : InstrumentManager::getInstance().getInstruments()) {
@@ -97,6 +129,13 @@ public:
                     case 'f':
                         handleCancelOrder();
                         break;
+                    case 'g':
+                        handleAddBalance();
+                        break;
+                    case 'h':
+                    case 'H':
+                        handleExitTrade();
+                        break;
                     case 'e':
                         running_ = false;
                         break;
@@ -123,56 +162,48 @@ private:
             const auto& sellLevels = orderBook->getSellLevels();
 
             std::cout << "\nOrder Book (Top 5 Levels)\n";
-            std::cout << "+---------------------------------------------------------------------------------------------+\n";
-            std::cout << "|  Bid Price  |  Buy Orders  |  Qty (Buyers)  ||  Ask Price  |  Sell Orders  |  Qty (Sellers)  |\n";
-            std::cout << "+---------------------------------------------------------------------------------------------+\n";
+            std::cout << "+-------------------------------------------------------------+\n";
+            std::cout << "|  Qty (Buyers)  |  Bid Price  ||  Ask Price  |  Qty (Sellers)  |\n";
+            std::cout << "+-------------------------------------------------------------+\n";
 
             size_t totalBuyQty = 0, totalSellQty = 0;
-            size_t totalBuyOrders = 0, totalSellOrders = 0;
             // Prepare top 5 buy and sell levels
-            std::vector<std::tuple<std::string, std::string, std::string>> buyRows;
-            std::vector<std::tuple<std::string, std::string, std::string>> sellRows;
+            std::vector<std::pair<std::string, std::string>> buyRows;  // qty, price
+            std::vector<std::pair<std::string, std::string>> sellRows; // price, qty
 
             size_t count = 0;
             for (auto it = buyLevels.begin(); it != buyLevels.end() && count < 5; ++it, ++count) {
                 double price = it->first;
                 size_t qty = it->second->getTotalQuantity();
-                size_t orders = it->second->getOrders().size();
                 std::stringstream priceStream;
                 priceStream << std::fixed << std::setprecision(2) << price;
-                buyRows.emplace_back(priceStream.str(), std::to_string(orders), std::to_string(qty));
+                buyRows.emplace_back(std::to_string(qty), priceStream.str());
                 totalBuyQty += qty;
-                totalBuyOrders += orders;
             }
             count = 0;
             for (auto it = sellLevels.begin(); it != sellLevels.end() && count < 5; ++it, ++count) {
                 double price = it->first;
                 size_t qty = it->second->getTotalQuantity();
-                size_t orders = it->second->getOrders().size();
                 std::stringstream priceStream;
                 priceStream << std::fixed << std::setprecision(2) << price;
-                sellRows.emplace_back(priceStream.str(), std::to_string(orders), std::to_string(qty));
+                sellRows.emplace_back(priceStream.str(), std::to_string(qty));
                 totalSellQty += qty;
-                totalSellOrders += orders;
             }
 
             // Print up to 5 rows
             for (size_t i = 0; i < 5; ++i) {
-                // Buy side
-                std::string bidPrice = i < buyRows.size() ? std::get<0>(buyRows[i]) : "";
-                std::string buyOrders = i < buyRows.size() ? std::get<1>(buyRows[i]) : "";
-                std::string buyQty = i < buyRows.size() ? std::get<2>(buyRows[i]) : "";
-                // Sell side
-                std::string askPrice = i < sellRows.size() ? std::get<0>(sellRows[i]) : "";
-                std::string sellOrders = i < sellRows.size() ? std::get<1>(sellRows[i]) : "";
-                std::string sellQty = i < sellRows.size() ? std::get<2>(sellRows[i]) : "";
-                std::cout << "| " << std::setw(10) << bidPrice << " | " << std::setw(11) << buyOrders << " | " << std::setw(13) << buyQty
-                          << " || " << std::setw(10) << askPrice << " | " << std::setw(12) << sellOrders << " | " << std::setw(14) << sellQty << " |\n";
+                // Buy side: Qty (Buyers), Bid Price
+                std::string buyQty = i < buyRows.size() ? buyRows[i].first : "";
+                std::string bidPrice = i < buyRows.size() ? buyRows[i].second : "";
+                // Sell side: Ask Price, Qty (Sellers)
+                std::string askPrice = i < sellRows.size() ? sellRows[i].first : "";
+                std::string sellQty = i < sellRows.size() ? sellRows[i].second : "";
+                std::cout << "| " << std::setw(13) << buyQty << " | " << std::setw(10) << bidPrice
+                          << " || " << std::setw(10) << askPrice << " | " << std::setw(14) << sellQty << " |\n";
             }
-            std::cout << "+---------------------------------------------------------------------------------------------+\n";
-            std::cout << "| Totals      | " << std::setw(11) << totalBuyOrders << " | " << std::setw(13) << totalBuyQty
-                      << " || Totals      | " << std::setw(12) << totalSellOrders << " | " << std::setw(14) << totalSellQty << " |\n";
-            std::cout << "+---------------------------------------------------------------------------------------------+\n";
+            std::cout << "+-------------------------------------------------------------+\n";
+            std::cout << "| " << std::setw(13) << totalBuyQty << " | Totals     || Totals      | " << std::setw(14) << totalSellQty << " |\n";
+            std::cout << "+-------------------------------------------------------------+\n";
         }
     void selectInstrument() {
         system("cls");
@@ -192,6 +223,223 @@ private:
         currentInstrumentId_ = selectedId;
         const auto* instrument = InstrumentManager::getInstance().getInstrumentById(selectedId);
         addToHistory("Selected instrument: " + instrument->name + " (" + instrument->symbol + ")");
+    }
+
+    // Handle adding balance
+    void handleAddBalance() {
+        addToHistory("=== Add Balance ===");
+        std::cout << "\nCurrent Balance: Rs." << std::fixed << std::setprecision(2) << totalBalance_ << std::endl;
+        std::cout << "Enter amount to add: Rs.";
+        double amount;
+        std::cin >> amount;
+        
+        if (amount <= 0) {
+            addToHistory("Invalid amount. Please enter a positive value.");
+            std::cout << "\nPress Enter to return to menu..."; 
+            std::cin.ignore(); 
+            std::cin.get();
+            return;
+        }
+        
+        totalBalance_ += amount;
+        std::stringstream ss;
+        ss << "Balance added: Rs." << std::fixed << std::setprecision(2) << amount 
+           << " | New Balance: Rs." << totalBalance_;
+        addToHistory(ss.str());
+        std::cout << "\nBalance added successfully! New Balance: Rs." << std::fixed << std::setprecision(2) << totalBalance_;
+        std::cout << "\nPress Enter to return to menu..."; 
+        std::cin.ignore(); 
+        std::cin.get();
+    }
+
+    // Check if user has sufficient balance for trade
+    bool checkAndPromptBalance(double netAmount) {
+        if (netAmount > totalBalance_) {
+            std::cout << "\n========================================" << std::endl;
+            std::cout << "INSUFFICIENT BALANCE!" << std::endl;
+            std::cout << "Required: Rs." << std::fixed << std::setprecision(2) << netAmount << std::endl;
+            std::cout << "Available: Rs." << std::fixed << std::setprecision(2) << totalBalance_ << std::endl;
+            std::cout << "Shortfall: Rs." << std::fixed << std::setprecision(2) << (netAmount - totalBalance_) << std::endl;
+            std::cout << "========================================" << std::endl;
+            std::cout << "\nWould you like to add balance? (1: Yes, 2: No): ";
+            int choice;
+            std::cin >> choice;
+            
+            if (choice == 1) {
+                std::cout << "Enter amount to add: Rs.";
+                double amount;
+                std::cin >> amount;
+                
+                if (amount > 0) {
+                    totalBalance_ += amount;
+                    std::stringstream ss;
+                    ss << "Balance added: Rs." << std::fixed << std::setprecision(2) << amount 
+                       << " | New Balance: Rs." << totalBalance_;
+                    addToHistory(ss.str());
+                    std::cout << "Balance updated! New Balance: Rs." << std::fixed << std::setprecision(2) << totalBalance_ << std::endl;
+                    
+                    // Check again if balance is now sufficient
+                    if (netAmount <= totalBalance_) {
+                        return true;
+                    } else {
+                        std::cout << "Still insufficient balance. Trade cancelled." << std::endl;
+                        std::cout << "\nPress Enter to return to menu..."; 
+                        std::cin.ignore(); 
+                        std::cin.get();
+                        return false;
+                    }
+                }
+            }
+            addToHistory("Trade cancelled due to insufficient balance.");
+            std::cout << "\nPress Enter to return to menu..."; 
+            std::cin.ignore(); 
+            std::cin.get();
+            return false;
+        }
+        return true;
+    }
+
+    // Calculate total unrealized P&L
+    double calculateTotalUnrealizedPnL() {
+        double totalPnL = 0.0;
+        std::lock_guard<std::mutex> lock(tradesMutex_);
+        for (const auto& trade : userActiveTrades_) {
+            if (!trade.isActive) continue;
+            
+            const auto* instrument = InstrumentManager::getInstance().getInstrumentById(trade.instrumentId);
+            if (!instrument) continue;
+            
+            double currentPrice = instrument->marketPrice;
+            double pnl = 0.0;
+            
+            if (trade.side == OrderSide::BUY) {
+                pnl = (currentPrice - trade.entryPrice) * trade.quantity;
+            } else {
+                pnl = (trade.entryPrice - currentPrice) * trade.quantity;
+            }
+            totalPnL += pnl;
+        }
+        return totalPnL;
+    }
+
+    // Handle exit trade
+    void handleExitTrade() {
+        addToHistory("=== Exit Trade ===");
+        
+        // Check if there are any active trades
+        {
+            std::lock_guard<std::mutex> lock(tradesMutex_);
+            bool hasActive = false;
+            for (const auto& trade : userActiveTrades_) {
+                if (trade.isActive) {
+                    hasActive = true;
+                    break;
+                }
+            }
+            if (!hasActive) {
+                addToHistory("No active trades to exit.");
+                std::cout << "\nNo active trades found. Press Enter to return to menu...";
+                std::cin.ignore();
+                std::cin.get();
+                return;
+            }
+        }
+        
+        // Ask for Order ID
+        std::cout << "\n=== Exit Trade ===" << std::endl;
+        std::cout << "Enter Order ID to exit (press Enter to confirm): ";
+        std::string orderId;
+        std::cin >> orderId;
+        
+        // Find the trade
+        UserTrade* foundTrade = nullptr;
+        int tradeIndex = -1;
+        {
+            std::lock_guard<std::mutex> lock(tradesMutex_);
+            for (size_t i = 0; i < userActiveTrades_.size(); ++i) {
+                if (userActiveTrades_[i].orderId == orderId && userActiveTrades_[i].isActive) {
+                    foundTrade = &userActiveTrades_[i];
+                    tradeIndex = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+        
+        if (!foundTrade) {
+            addToHistory("Trade not found or already exited: " + orderId);
+            std::cout << "\nTrade not found or already exited. Press Enter to return to menu...";
+            std::cin.ignore();
+            std::cin.get();
+            return;
+        }
+        
+        // Get current price and calculate P&L
+        const auto* instrument = InstrumentManager::getInstance().getInstrumentById(foundTrade->instrumentId);
+        double currentPrice = instrument ? instrument->marketPrice : 0.0;
+        double pnl = 0.0;
+        double pnlPercent = 0.0;
+        
+        if (foundTrade->side == OrderSide::BUY) {
+            pnl = (currentPrice - foundTrade->entryPrice) * foundTrade->quantity;
+        } else {
+            pnl = (foundTrade->entryPrice - currentPrice) * foundTrade->quantity;
+        }
+        
+        if (foundTrade->entryPrice > 0) {
+            pnlPercent = (pnl / (foundTrade->entryPrice * foundTrade->quantity)) * 100.0;
+        }
+        
+        // Exit the trade - add P&L to balance and track realized P&L
+        totalBalance_ += pnl + (foundTrade->entryPrice * foundTrade->quantity);
+        totalRealizedPnL_ += pnl;
+        
+        // Create closed trade record and add to history
+        ClosedTrade closedTrade(
+            foundTrade->orderId,
+            foundTrade->instrumentId,
+            foundTrade->side,
+            foundTrade->quantity,
+            foundTrade->entryPrice,
+            currentPrice,
+            pnl,
+            pnlPercent
+        );
+        
+        {
+            std::lock_guard<std::mutex> lock(tradesMutex_);
+            userTradeHistory_.push_back(closedTrade);
+            // Mark trade as inactive
+            for (auto& trade : userActiveTrades_) {
+                if (trade.orderId == orderId) {
+                    trade.isActive = false;
+                    break;
+                }
+            }
+        }
+        
+        std::stringstream ss;
+        ss << "Trade SQUARED OFF - ID: " << orderId 
+           << " | Exit Price: Rs." << std::fixed << std::setprecision(2) << currentPrice
+           << " | Realized P&L: Rs." << pnl;
+        addToHistory(ss.str());
+        
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "TRADE SQUARED OFF SUCCESSFULLY!" << std::endl;
+        std::cout << "========================================" << std::endl;
+        std::cout << "Order ID: " << orderId << std::endl;
+        std::cout << "Instrument: " << (instrument ? instrument->symbol : "Unknown") << std::endl;
+        std::cout << "Side: " << (foundTrade->side == OrderSide::BUY ? "BUY" : "SELL") << std::endl;
+        std::cout << "Quantity: " << foundTrade->quantity << std::endl;
+        std::cout << "Entry Price: Rs." << std::fixed << std::setprecision(2) << foundTrade->entryPrice << std::endl;
+        std::cout << "Exit Price: Rs." << std::fixed << std::setprecision(2) << currentPrice << std::endl;
+        std::cout << "Realized P&L: Rs." << std::fixed << std::setprecision(2) << pnl << " (" << pnlPercent << "%)" << std::endl;
+        std::cout << "========================================" << std::endl;
+        std::cout << "New Balance: Rs." << std::fixed << std::setprecision(2) << totalBalance_ << std::endl;
+        std::cout << "Total Realized P&L: Rs." << std::fixed << std::setprecision(2) << totalRealizedPnL_ << std::endl;
+        
+        std::cout << "\nPress Enter to return to menu...";
+        std::cin.ignore();
+        std::cin.get();
     }
 
     void handleBuyOrder() {
@@ -218,6 +466,12 @@ private:
             }
         }
 
+        // Calculate net amount and check balance
+        double netAmount = price * quantity;
+        if (!checkAndPromptBalance(netAmount)) {
+            return;
+        }
+
         auto order = std::make_shared<Order>(
             type == 1 ? OrderType::MARKET : OrderType::LIMIT,
             OrderSide::BUY,
@@ -232,14 +486,24 @@ private:
         logger_.logOrder(*order);
         userOrders_.push_back(order);
 
+        // Deduct from balance
+        totalBalance_ -= netAmount;
+
+        // Add to active trades for tracking
+        {
+            std::lock_guard<std::mutex> lock(tradesMutex_);
+            userActiveTrades_.emplace_back(order->getOrderId(), currentInstrumentId_, OrderSide::BUY, quantity, price);
+        }
+
         std::stringstream ss;
         ss << "BUY Order placed - ID: " << order->getOrderId() 
            << " | Type: " << (type == 1 ? "MARKET" : "LIMIT")
-           << " | Quantity: " << quantity;
+           << " | Quantity: " << quantity
+           << " | Net Amount: Rs." << std::fixed << std::setprecision(2) << netAmount;
         if (type == 2) {
-            ss << " | Price: $" << std::fixed << std::setprecision(2) << price;
+            ss << " | Price: Rs." << std::fixed << std::setprecision(2) << price;
         } else {
-            ss << " | Market Price: $" << std::fixed << std::setprecision(2) << price;
+            ss << " | Market Price: Rs." << std::fixed << std::setprecision(2) << price;
         }
         addToHistory(ss.str());
     }
@@ -268,6 +532,12 @@ private:
             }
         }
 
+        // Calculate net amount and check balance
+        double netAmount = price * quantity;
+        if (!checkAndPromptBalance(netAmount)) {
+            return;
+        }
+
         auto order = std::make_shared<Order>(
             type == 1 ? OrderType::MARKET : OrderType::LIMIT,
             OrderSide::SELL,
@@ -282,14 +552,24 @@ private:
         logger_.logOrder(*order);
         userOrders_.push_back(order);
 
+        // Deduct from balance
+        totalBalance_ -= netAmount;
+
+        // Add to active trades for tracking
+        {
+            std::lock_guard<std::mutex> lock(tradesMutex_);
+            userActiveTrades_.emplace_back(order->getOrderId(), currentInstrumentId_, OrderSide::SELL, quantity, price);
+        }
+
         std::stringstream ss;
         ss << "SELL Order placed - ID: " << order->getOrderId() 
            << " | Type: " << (type == 1 ? "MARKET" : "LIMIT")
-           << " | Quantity: " << quantity;
+           << " | Quantity: " << quantity
+           << " | Net Amount: Rs." << std::fixed << std::setprecision(2) << netAmount;
         if (type == 2) {
-            ss << " | Price: $" << std::fixed << std::setprecision(2) << price;
+            ss << " | Price: Rs." << std::fixed << std::setprecision(2) << price;
         } else {
-            ss << " | Market Price: $" << std::fixed << std::setprecision(2) << price;
+            ss << " | Market Price: Rs." << std::fixed << std::setprecision(2) << price;
         }
         addToHistory(ss.str());
     }
@@ -485,6 +765,17 @@ private:
             }
             const_cast<Instrument*>(currentInstrument)->marketPrice = marketPrice;
 
+            // Display User Info Section
+            double unrealizedPnL = calculateTotalUnrealizedPnL();
+            std::cout << "\n+============================================================+\n";
+            std::cout << "|                       USER INFO                            |\n";
+            std::cout << "+============================================================+\n";
+            std::cout << "| User ID: " << std::left << std::setw(49) << userId_ << "|\n";
+            std::cout << "| Total Balance: Rs." << std::fixed << std::setprecision(2) << std::setw(39) << totalBalance_ << "|\n";
+            std::cout << "| Total Unrealized P&L: Rs." << std::fixed << std::setprecision(2) << std::setw(32) << unrealizedPnL << "|\n";
+            std::cout << "| Total Realized P&L: Rs." << std::fixed << std::setprecision(2) << std::setw(34) << totalRealizedPnL_ << "|\n";
+            std::cout << "+============================================================+\n";
+
             // Display message history
             std::cout << "\n=== Transaction History ===\n";
             {
@@ -493,6 +784,12 @@ private:
                     std::cout << msg << "\n";
                 }
             }
+
+            // Display User's Active Trades Section
+            displayUserTradesSection();
+
+            // Display User's Trade History Section (Squared Off Trades)
+            displayTradeHistorySection();
 
             // Display current price of all instruments
             std::cout << "\n=== Current Price Of All Instruments ===\n";
@@ -522,18 +819,113 @@ private:
             // Display order book for the selected instrument
             displayOrderBookTable(currentOrderBook, marketPrice);
             // Display menu
-            std::cout << "\n+------------------+\n";
-            std::cout << "|       MENU        |\n";
-            std::cout << "+------------------+\n";
-            std::cout << "| a. Place Buy     |\n";
-            std::cout << "| b. Place Sell    |\n";
-            std::cout << "| c. View Orders   |\n";
-            std::cout << "| d. Query Order   |\n";
-            std::cout << "| e. Exit          |\n";
-            std::cout << "| f. Cancel Order  |\n";
-            std::cout << "+------------------+\n";
+            std::cout << "\n+---------------------+\n";
+            std::cout << "|         MENU        |\n";
+            std::cout << "+---------------------+\n";
+            std::cout << "| a. Place Buy        |\n";
+            std::cout << "| b. Place Sell       |\n";
+            std::cout << "| c. View Orders      |\n";
+            std::cout << "| d. Query Order      |\n";
+            std::cout << "| e. Exit Application |\n";
+            std::cout << "| f. Cancel Order     |\n";
+            std::cout << "| g. Add Balance      |\n";
+            std::cout << "| h. Exit Trade       |\n";
+            std::cout << "+---------------------+\n";
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
+    }
+
+    // Display user's active trades with live P&L
+    void displayUserTradesSection() {
+        std::cout << "\n+======================================================================================================================+\n";
+        std::cout << "|                                              YOUR ACTIVE TRADES                                                      |\n";
+        std::cout << "+======================================================================================================================+\n";
+        std::cout << "| Order ID         | Instrument         | Side   | Qty     | Entry Price | LTP (Current) | P&L          | P&L %       |\n";
+        std::cout << "+------------------+--------------------+--------+---------+-------------+---------------+--------------+-------------+\n";
+        
+        std::lock_guard<std::mutex> lock(tradesMutex_);
+        
+        bool hasActiveTrades = false;
+        for (const auto& trade : userActiveTrades_) {
+            if (!trade.isActive) continue;
+            hasActiveTrades = true;
+            
+            const auto* instrument = InstrumentManager::getInstance().getInstrumentById(trade.instrumentId);
+            if (!instrument) continue;
+            
+            double currentPrice = instrument->marketPrice;
+            double pnl = 0.0;
+            double pnlPercent = 0.0;
+            
+            if (trade.side == OrderSide::BUY) {
+                pnl = (currentPrice - trade.entryPrice) * trade.quantity;
+            } else {
+                pnl = (trade.entryPrice - currentPrice) * trade.quantity;
+            }
+            
+            if (trade.entryPrice > 0) {
+                pnlPercent = (pnl / (trade.entryPrice * trade.quantity)) * 100.0;
+            }
+            
+            std::string pnlStr = (pnl >= 0 ? "+" : "") + std::to_string(pnl);
+            std::string pnlPercentStr = (pnlPercent >= 0 ? "+" : "") + std::to_string(pnlPercent);
+            
+            std::stringstream pnlSS, pnlPercentSS;
+            pnlSS << std::fixed << std::setprecision(2) << pnl;
+            pnlPercentSS << std::fixed << std::setprecision(2) << pnlPercent << "%";
+            
+            std::cout << "| " << std::left << std::setw(16) << trade.orderId.substr(0, 16)
+                      << " | " << std::setw(18) << (instrument->symbol.length() > 18 ? instrument->symbol.substr(0, 18) : instrument->symbol)
+                      << " | " << std::setw(6) << (trade.side == OrderSide::BUY ? "BUY" : "SELL")
+                      << " | " << std::setw(7) << trade.quantity
+                      << " | Rs." << std::fixed << std::setprecision(2) << std::setw(8) << trade.entryPrice
+                      << " | Rs." << std::setw(10) << currentPrice
+                      << " | Rs." << std::setw(9) << pnlSS.str()
+                      << " | " << std::setw(11) << pnlPercentSS.str() << " |\n";
+        }
+        
+        if (!hasActiveTrades) {
+            std::cout << "|                                        No active trades. Place an order to start trading!                           |\n";
+        }
+        
+        std::cout << "+======================================================================================================================+\n";
+    }
+
+    // Display user's closed/squared-off trade history
+    void displayTradeHistorySection() {
+        std::cout << "\n+======================================================================================================================+\n";
+        std::cout << "|                                              YOUR TRADE HISTORY (Squared Off)                                       |\n";
+        std::cout << "+======================================================================================================================+\n";
+        std::cout << "| Order ID         | Instrument         | Side   | Qty     | Entry Price | Exit Price    | P&L          | P&L %       |\n";
+        std::cout << "+------------------+--------------------+--------+---------+-------------+---------------+--------------+-------------+\n";
+        
+        std::lock_guard<std::mutex> lock(tradesMutex_);
+        
+        if (userTradeHistory_.empty()) {
+            std::cout << "|                                       No closed trades yet. Exit a trade to see history!                            |\n";
+        } else {
+            // Show last 5 closed trades (most recent first)
+            int count = 0;
+            for (auto it = userTradeHistory_.rbegin(); it != userTradeHistory_.rend() && count < 5; ++it, ++count) {
+                const auto& trade = *it;
+                const auto* instrument = InstrumentManager::getInstance().getInstrumentById(trade.instrumentId);
+                
+                std::stringstream pnlSS, pnlPercentSS;
+                pnlSS << std::fixed << std::setprecision(2) << trade.realizedPnL;
+                pnlPercentSS << std::fixed << std::setprecision(2) << trade.pnlPercent << "%";
+                
+                std::cout << "| " << std::left << std::setw(16) << trade.orderId.substr(0, 16)
+                          << " | " << std::setw(18) << (instrument ? instrument->symbol.substr(0, 18) : "Unknown")
+                          << " | " << std::setw(6) << (trade.side == OrderSide::BUY ? "BUY" : "SELL")
+                          << " | " << std::setw(7) << trade.quantity
+                          << " | Rs." << std::fixed << std::setprecision(2) << std::setw(8) << trade.entryPrice
+                          << " | Rs." << std::setw(10) << trade.exitPrice
+                          << " | Rs." << std::setw(9) << pnlSS.str()
+                          << " | " << std::setw(11) << pnlPercentSS.str() << " |\n";
+            }
+        }
+        
+        std::cout << "+======================================================================================================================+\n";
     }
 
     size_t getTotalVolumeForInstrument(int instrumentId) {
@@ -574,6 +966,14 @@ private:
     int currentInstrumentId_;
     std::condition_variable cvRefresh_;
     std::mutex cvMutex_;
+    
+    // User account management
+    std::string userId_;
+    double totalBalance_;
+    double totalRealizedPnL_;
+    std::vector<UserTrade> userActiveTrades_;
+    std::vector<ClosedTrade> userTradeHistory_;
+    mutable std::mutex tradesMutex_;
 };
 
 int main() {
