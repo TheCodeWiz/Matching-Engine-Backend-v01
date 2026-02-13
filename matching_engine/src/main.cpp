@@ -10,11 +10,99 @@
 #include <sstream>
 #include <windows.h>
 #include <map>
+#include <atomic>
+#include <fstream>
 #include "OrderBook.hpp"
 #include "MockTrader.hpp"
 #include "Logger.hpp"
 #include "MarketDisplay.hpp"
 #include "Instrument.hpp"
+
+// Thread-safe User ID Generator
+// User IDs for real users start from 10001 (mock traders use 1-10000)
+// Uses atomic counter and timestamp to ensure uniqueness even with concurrent access
+class UserIdGenerator {
+public:
+    static UserIdGenerator& getInstance() {
+        static UserIdGenerator instance;
+        return instance;
+    }
+    
+    // Generate a unique user ID (thread-safe, first-come-first-served based on atomic increment)
+    std::string generateUserId() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        
+        // Get current timestamp for logging/verification
+        auto now = std::chrono::system_clock::now();
+        auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+            now.time_since_epoch()).count();
+        
+        // Atomically increment and get the next user ID
+        int userId = nextUserId_.fetch_add(1);
+        
+        // Store allocation info for verification
+        userAllocations_[userId] = timestamp;
+        
+        // Format as "USR" + 5-digit number
+        std::stringstream ss;
+        ss << "USR" << userId;
+        return ss.str();
+    }
+    
+    // Check if a user ID has been allocated
+    bool isUserIdAllocated(int userId) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return userAllocations_.find(userId) != userAllocations_.end();
+    }
+    
+    // Get the timestamp when a user ID was allocated
+    long long getAllocationTimestamp(int userId) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = userAllocations_.find(userId);
+        if (it != userAllocations_.end()) {
+            return it->second;
+        }
+        return -1;
+    }
+    
+private:
+    UserIdGenerator() : nextUserId_(10001) {
+        // Load last used ID from file if exists (for persistence across sessions)
+        loadLastUsedId();
+    }
+    
+    ~UserIdGenerator() {
+        // Save the current ID counter for next session
+        saveLastUsedId();
+    }
+    
+    void loadLastUsedId() {
+        std::ifstream file("user_id_counter.dat");
+        if (file.is_open()) {
+            int lastId;
+            if (file >> lastId && lastId >= 10001) {
+                nextUserId_.store(lastId);
+            }
+            file.close();
+        }
+    }
+    
+    void saveLastUsedId() {
+        std::ofstream file("user_id_counter.dat");
+        if (file.is_open()) {
+            file << nextUserId_.load();
+            file.close();
+        }
+    }
+    
+    // Prevent copying
+    UserIdGenerator(const UserIdGenerator&) = delete;
+    UserIdGenerator& operator=(const UserIdGenerator&) = delete;
+    
+    std::atomic<int> nextUserId_;
+    std::map<int, long long> userAllocations_;  // userId -> allocation timestamp (microseconds)
+    mutable std::mutex mutex_;
+};
 
 // Structure to track user's active trades/positions
 struct UserTrade {
@@ -71,7 +159,7 @@ public:
     TradingApplication()
         : logger_("trading_log.txt")
         , userTradeCount_(0)
-        , userId_("USR10001")
+        , userId_(UserIdGenerator::getInstance().generateUserId())
         , totalBalance_(5000000.0)
         , totalRealizedPnL_(0.0)
     {
@@ -135,6 +223,14 @@ public:
                     case 'h':
                     case 'H':
                         handleExitTrade();
+                        break;
+                    case 'i':
+                    case 'I':
+                        handleWithdrawBalance();
+                        break;
+                    case 'j':
+                    case 'J':
+                        handleExitAllTrades();
                         break;
                     case 'e':
                         running_ = false;
@@ -247,6 +343,48 @@ private:
            << " | New Balance: Rs." << totalBalance_;
         addToHistory(ss.str());
         std::cout << "\nBalance added successfully! New Balance: Rs." << std::fixed << std::setprecision(2) << totalBalance_;
+        std::cout << "\nPress Enter to return to menu..."; 
+        std::cin.ignore(); 
+        std::cin.get();
+    }
+
+    // Handle withdrawing balance
+    void handleWithdrawBalance() {
+        addToHistory("=== Withdraw Balance ===");
+        std::cout << "\nCurrent Balance: Rs." << std::fixed << std::setprecision(2) << totalBalance_ << std::endl;
+        std::cout << "Enter amount to withdraw: Rs.";
+        double amount;
+        std::cin >> amount;
+        
+        if (amount <= 0) {
+            addToHistory("Invalid amount. Please enter a positive value.");
+            std::cout << "\nPress Enter to return to menu..."; 
+            std::cin.ignore(); 
+            std::cin.get();
+            return;
+        }
+        
+        if (amount > totalBalance_) {
+            std::cout << "\n========================================" << std::endl;
+            std::cout << "WITHDRAWAL FAILED!" << std::endl;
+            std::cout << "========================================" << std::endl;
+            std::cout << "Withdrawing amount (Rs." << std::fixed << std::setprecision(2) << amount 
+                      << ") is more than the total balance (Rs." << totalBalance_ << ")." << std::endl;
+            std::cout << "Please try entering a lesser amount or the same amount as total balance." << std::endl;
+            std::cout << "========================================" << std::endl;
+            addToHistory("Withdrawal failed: Amount exceeds total balance.");
+            std::cout << "\nPress Enter to return to menu..."; 
+            std::cin.ignore(); 
+            std::cin.get();
+            return;
+        }
+        
+        totalBalance_ -= amount;
+        std::stringstream ss;
+        ss << "Balance withdrawn: Rs." << std::fixed << std::setprecision(2) << amount 
+           << " | New Balance: Rs." << totalBalance_;
+        addToHistory(ss.str());
+        std::cout << "\nWithdrawal successful! New Balance: Rs." << std::fixed << std::setprecision(2) << totalBalance_;
         std::cout << "\nPress Enter to return to menu..."; 
         std::cin.ignore(); 
         std::cin.get();
@@ -436,6 +574,120 @@ private:
         std::cout << "========================================" << std::endl;
         std::cout << "New Balance: Rs." << std::fixed << std::setprecision(2) << totalBalance_ << std::endl;
         std::cout << "Total Realized P&L: Rs." << std::fixed << std::setprecision(2) << totalRealizedPnL_ << std::endl;
+        
+        std::cout << "\nPress Enter to return to menu...";
+        std::cin.ignore();
+        std::cin.get();
+    }
+
+    // Handle exit all trades - square off all active trades immediately at current LTP
+    void handleExitAllTrades() {
+        addToHistory("=== Exit All Trades ===");
+        
+        // Check if there are any active trades
+        std::vector<UserTrade*> activeTrades;
+        {
+            std::lock_guard<std::mutex> lock(tradesMutex_);
+            for (auto& trade : userActiveTrades_) {
+                if (trade.isActive) {
+                    activeTrades.push_back(&trade);
+                }
+            }
+        }
+        
+        if (activeTrades.empty()) {
+            addToHistory("No active trades to exit.");
+            std::cout << "\nNo active trades found. Press Enter to return to menu...";
+            std::cin.ignore();
+            std::cin.get();
+            return;
+        }
+        
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "SQUARING OFF ALL ACTIVE TRADES..." << std::endl;
+        std::cout << "========================================" << std::endl;
+        
+        double totalPnL = 0.0;
+        int tradesExited = 0;
+        
+        // Process each active trade
+        for (auto* trade : activeTrades) {
+            // Get current price (LTP) for the instrument
+            const auto* instrument = InstrumentManager::getInstance().getInstrumentById(trade->instrumentId);
+            double currentPrice = instrument ? instrument->marketPrice : 0.0;
+            double pnl = 0.0;
+            double pnlPercent = 0.0;
+            
+            if (trade->side == OrderSide::BUY) {
+                pnl = (currentPrice - trade->entryPrice) * trade->quantity;
+            } else {
+                pnl = (trade->entryPrice - currentPrice) * trade->quantity;
+            }
+            
+            if (trade->entryPrice > 0) {
+                pnlPercent = (pnl / (trade->entryPrice * trade->quantity)) * 100.0;
+            }
+            
+            // Exit the trade - add P&L to balance and track realized P&L
+            totalBalance_ += pnl + (trade->entryPrice * trade->quantity);
+            totalRealizedPnL_ += pnl;
+            totalPnL += pnl;
+            
+            // Create closed trade record
+            ClosedTrade closedTrade(
+                trade->orderId,
+                trade->instrumentId,
+                trade->side,
+                trade->quantity,
+                trade->entryPrice,
+                currentPrice,
+                pnl,
+                pnlPercent
+            );
+            
+            {
+                std::lock_guard<std::mutex> lock(tradesMutex_);
+                userTradeHistory_.push_back(closedTrade);
+            }
+            
+            // Display individual trade exit details
+            std::cout << "Squared Off: " << trade->orderId 
+                      << " | " << (instrument ? instrument->symbol : "Unknown")
+                      << " | " << (trade->side == OrderSide::BUY ? "BUY" : "SELL")
+                      << " | Qty: " << trade->quantity
+                      << " | Entry: Rs." << std::fixed << std::setprecision(2) << trade->entryPrice
+                      << " | Exit: Rs." << currentPrice
+                      << " | P&L: Rs." << pnl << std::endl;
+            
+            std::stringstream ss;
+            ss << "Trade SQUARED OFF - ID: " << trade->orderId 
+               << " | Exit Price: Rs." << std::fixed << std::setprecision(2) << currentPrice
+               << " | P&L: Rs." << pnl;
+            addToHistory(ss.str());
+            
+            tradesExited++;
+        }
+        
+        // Mark all trades as inactive
+        {
+            std::lock_guard<std::mutex> lock(tradesMutex_);
+            for (auto& trade : userActiveTrades_) {
+                trade.isActive = false;
+            }
+        }
+        
+        std::cout << "\n========================================" << std::endl;
+        std::cout << "ALL TRADES SQUARED OFF SUCCESSFULLY!" << std::endl;
+        std::cout << "========================================" << std::endl;
+        std::cout << "Total Trades Exited: " << tradesExited << std::endl;
+        std::cout << "Total Realized P&L: Rs." << std::fixed << std::setprecision(2) << totalPnL << std::endl;
+        std::cout << "New Balance: Rs." << std::fixed << std::setprecision(2) << totalBalance_ << std::endl;
+        std::cout << "Cumulative Realized P&L: Rs." << std::fixed << std::setprecision(2) << totalRealizedPnL_ << std::endl;
+        std::cout << "========================================" << std::endl;
+        
+        std::stringstream summaryss;
+        summaryss << "All trades squared off - Total P&L: Rs." << std::fixed << std::setprecision(2) << totalPnL;
+        addToHistory(summaryss.str());
         
         std::cout << "\nPress Enter to return to menu...";
         std::cin.ignore();
@@ -819,18 +1071,20 @@ private:
             // Display order book for the selected instrument
             displayOrderBookTable(currentOrderBook, marketPrice);
             // Display menu
-            std::cout << "\n+---------------------+\n";
-            std::cout << "|         MENU        |\n";
-            std::cout << "+---------------------+\n";
-            std::cout << "| a. Place Buy        |\n";
-            std::cout << "| b. Place Sell       |\n";
-            std::cout << "| c. View Orders      |\n";
-            std::cout << "| d. Query Order      |\n";
-            std::cout << "| e. Exit Application |\n";
-            std::cout << "| f. Cancel Order     |\n";
-            std::cout << "| g. Add Balance      |\n";
-            std::cout << "| h. Exit Trade       |\n";
-            std::cout << "+---------------------+\n";
+            std::cout << "\n+----------------------+\n";
+            std::cout << "|         MENU         |\n";
+            std::cout << "+----------------------+\n";
+            std::cout << "| a. Place Buy         |\n";
+            std::cout << "| b. Place Sell        |\n";
+            std::cout << "| c. View Orders       |\n";
+            std::cout << "| d. Query Order       |\n";
+            std::cout << "| e. Exit Application  |\n";
+            std::cout << "| f. Cancel Order      |\n";
+            std::cout << "| g. Add Balance       |\n";
+            std::cout << "| h. Exit Trade        |\n";
+            std::cout << "| i. Withdraw Balance  |\n";
+            std::cout << "| j. Exit All Trades   |\n";
+            std::cout << "+----------------------+\n";
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
     }
