@@ -1,4 +1,4 @@
-#include <iostream>
+﻿#include <iostream>
 #include <vector>
 #include <memory>
 #include <thread>
@@ -1028,6 +1028,20 @@ private:
             std::cout << "| Total Realized P&L: Rs." << std::fixed << std::setprecision(2) << std::setw(34) << totalRealizedPnL_ << "|\n";
             std::cout << "+============================================================+\n";
 
+            // Display Volume Information Section (between USER INFO and Transaction History)
+            size_t globalTotalVolume = getGlobalTotalVolume();
+            size_t globalBuyVolume = getGlobalBuyVolume();
+            size_t globalSellVolume = getGlobalSellVolume();
+            size_t globalTradeCount = getGlobalTradeCount();
+            std::cout << "\n+============================================================+\n";
+            std::cout << "|                   VOLUME INFORMATION                       |\n";
+            std::cout << "+============================================================+\n";
+            std::cout << "| Total Volume (All Instruments): " << std::left << std::setw(24) << globalTotalVolume << "|\n";
+            std::cout << "| Total Buy Volume:               " << std::left << std::setw(24) << globalBuyVolume << "|\n";
+            std::cout << "| Total Sell Volume:              " << std::left << std::setw(24) << globalSellVolume << "|\n";
+            std::cout << "| Total Trades (All Instruments): " << std::left << std::setw(24) << globalTradeCount << "|\n";
+            std::cout << "+============================================================+\n";
+
             // Display message history
             std::cout << "\n=== Transaction History ===\n";
             {
@@ -1052,7 +1066,7 @@ private:
                 double price = instrument.marketPrice;
                 std::cout << "| " << std::left << std::setw(25) << instrument.name
                           << "| " << std::setw(13) << instrument.symbol
-                          << "| ₹" << std::fixed << std::setprecision(2) << std::setw(14) << price << "|\n";
+                          << "| â‚¹" << std::fixed << std::setprecision(2) << std::setw(14) << price << "|\n";
             }
             std::cout << "+------------------------------------------+\n";
 
@@ -1066,7 +1080,16 @@ private:
             std::cout << "| Market Price: " << std::fixed << std::setprecision(2) << std::right << std::setw(10) << marketPrice << std::setw(12) << "|\n";
             std::cout << "| Best Bid:    " << std::fixed << std::setprecision(2) << std::right << std::setw(10) << bestBid << std::setw(12) << "|\n";
             std::cout << "| Best Ask:    " << std::fixed << std::setprecision(2) << std::right << std::setw(10) << bestAsk << std::setw(12) << "|\n";
-            std::cout << "| Total Volume: " << getTotalVolumeForInstrument(currentInstrumentId_) << std::setw(25) << "|\n";
+            std::cout << "+------------------------------------------+\n";
+            // Per-instrument volume statistics
+            size_t instTotalVolume = getTotalVolumeForInstrument(currentInstrumentId_);
+            size_t instBuyVolume = getTotalBuyVolumeForInstrument(currentInstrumentId_);
+            size_t instSellVolume = getTotalSellVolumeForInstrument(currentInstrumentId_);
+            size_t instTradeCount = getTotalTradeCountForInstrument(currentInstrumentId_);
+            std::cout << "| Total Volume:      " << std::left << std::setw(20) << instTotalVolume << "|\n";
+            std::cout << "| Total Buy Volume:  " << std::left << std::setw(20) << instBuyVolume << "|\n";
+            std::cout << "| Total Sell Volume: " << std::left << std::setw(20) << instSellVolume << "|\n";
+            std::cout << "| Total Trades:      " << std::left << std::setw(20) << instTradeCount << "|\n";
             std::cout << "+------------------------------------------+\n";
             // Display order book for the selected instrument
             displayOrderBookTable(currentOrderBook, marketPrice);
@@ -1182,29 +1205,74 @@ private:
         std::cout << "+======================================================================================================================+\n";
     }
 
+    // Get total volume for a specific instrument from OrderBook trades
     size_t getTotalVolumeForInstrument(int instrumentId) {
+        auto it = orderBooks_.find(instrumentId);
+        if (it != orderBooks_.end()) {
+            return it->second->getTotalVolume();
+        }
+        return 0;
+    }
+
+    // Get total buy volume for a specific instrument
+    size_t getTotalBuyVolumeForInstrument(int instrumentId) {
+        auto it = orderBooks_.find(instrumentId);
+        if (it != orderBooks_.end()) {
+            return it->second->getTotalBuyVolume();
+        }
+        return 0;
+    }
+
+    // Get total sell volume for a specific instrument
+    size_t getTotalSellVolumeForInstrument(int instrumentId) {
+        auto it = orderBooks_.find(instrumentId);
+        if (it != orderBooks_.end()) {
+            return it->second->getTotalSellVolume();
+        }
+        return 0;
+    }
+
+    // Get total trade count for a specific instrument
+    size_t getTotalTradeCountForInstrument(int instrumentId) {
+        auto it = orderBooks_.find(instrumentId);
+        if (it != orderBooks_.end()) {
+            return it->second->getTotalTradeCount();
+        }
+        return 0;
+    }
+
+    // Get total volume across ALL instruments
+    size_t getGlobalTotalVolume() {
         size_t total = 0;
-        // User orders
-        for (const auto& order : userOrders_) {
-            if (order->getStatus() != OrderStatus::CANCELLED && order->getStatus() != OrderStatus::EXPIRED && order->getStatus() != OrderStatus::NEW)
-                if (order->getInstrumentId() == instrumentId)
-                    total += order->getQuantity();
+        for (const auto& [id, orderBook] : orderBooks_) {
+            total += orderBook->getTotalVolume();
         }
-        // Mock trader orders
-        auto orderBook = orderBooks_[instrumentId];
-        const auto& buyLevels = orderBook->getBuyLevels();
-        const auto& sellLevels = orderBook->getSellLevels();
-        for (const auto& [price, level] : buyLevels) {
-            for (const auto& order : level->getOrders()) {
-                if (order->getStatus() != OrderStatus::CANCELLED && order->getStatus() != OrderStatus::EXPIRED && order->getStatus() != OrderStatus::NEW)
-                    total += order->getQuantity();
-            }
+        return total;
+    }
+
+    // Get total buy volume across ALL instruments
+    size_t getGlobalBuyVolume() {
+        size_t total = 0;
+        for (const auto& [id, orderBook] : orderBooks_) {
+            total += orderBook->getTotalBuyVolume();
         }
-        for (const auto& [price, level] : sellLevels) {
-            for (const auto& order : level->getOrders()) {
-                if (order->getStatus() != OrderStatus::CANCELLED && order->getStatus() != OrderStatus::EXPIRED && order->getStatus() != OrderStatus::NEW)
-                    total += order->getQuantity();
-            }
+        return total;
+    }
+
+    // Get total sell volume across ALL instruments
+    size_t getGlobalSellVolume() {
+        size_t total = 0;
+        for (const auto& [id, orderBook] : orderBooks_) {
+            total += orderBook->getTotalSellVolume();
+        }
+        return total;
+    }
+
+    // Get total trade count across ALL instruments
+    size_t getGlobalTradeCount() {
+        size_t total = 0;
+        for (const auto& [id, orderBook] : orderBooks_) {
+            total += orderBook->getTotalTradeCount();
         }
         return total;
     }
@@ -1235,3 +1303,4 @@ int main() {
     app.start();
     return 0;
 }
+
